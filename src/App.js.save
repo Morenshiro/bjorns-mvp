@@ -1,0 +1,264 @@
+  }
+
+  // Выбор цели в предпросмотр
+  function openPreview(kind) {
+    if (game.expedition.active) return;
+    if (kind === "player") setPreview(makePlayerTarget());
+    if (kind === "vesp_silver") setPreview(makeVesp("vesp_silver"));
+    if (kind === "vesp_crystal") setPreview(makeVesp("vesp_crystal"));
+    if (kind === "vesp_gold") setPreview(makeVesp("vesp_gold"));
+  }
+  function nextPreview() {
+    if (!preview) return;
+    openPreview(preview.kind);
+  }
+
+  function winProbability(aStats, bStats) {
+    const score = (s) => s.strength * 1.1 + s.defense * 1.0 + s.mastery * 1.15 + s.agility * 0.85 + s.vitality * 0.7;
+    const A = score(aStats); const B = score(bStats);
+    return clamp(Math.round((A / (A + B)) * 100), 5, 95);
+  }
+
+  function resolvePreviewFight() {
+    if (!preview) return;
+    if (game.expedition.active) return;
+    if (game.fight.charges <= 0) { pushLog("Нет зарядов боя"); return; }
+    // Для PvP проверка диапазона уровня ±3
+    if (preview.kind === "player" && Math.abs(preview.level - level) > 3) { pushLog("Цель вне диапазона уровней"); return; }
+
+    consumeFight();
+    const prob = winProbability(game.stats, preview.stats);
+    const win = Math.random() * 100 < prob;
+
+    // XP правила
+    if (preview.kind === "player" && win) {
+      const diff = preview.level - level;
+      if (diff === 0) addXP(1);
+      if (diff > 0) addXP(2);
+    }
+
+    // Награды
+    if (preview.kind === "player") {
+      if (win) {
+        const stolenSilver = Math.floor(preview.wallet.silver * 0.4);
+        addSilver(stolenSilver);
+        if (Math.random() < 0.10 && preview.wallet.crystals > 0) {
+          const stolenCr = Math.max(1, Math.floor(preview.wallet.crystals * 0.3));
+          addCrystals(stolenCr);
+          pushLog(`PvP: победа, +${fmt(stolenSilver)} сера, +${stolenCr} крист.`);
+        } else {
+          pushLog(`PvP: победа, +${fmt(stolenSilver)} сера`);
+        }
+      } else pushLog("PvP: поражение");
+    } else {
+      // VESP награды
+      const baseSilver = preview.wallet.silver;
+      if (preview.kind === "vesp_silver") {
+        // всегда серебро
+        const s = baseSilver;
+        addSilver(s);
+        pushLog(`Весп (серебро): +${fmt(s)} сера${win?" (победа)":" (поражение)"}`);
+      }
+      if (preview.kind === "vesp_crystal") {
+        // серебро чуть больше (×1.2) и 50% шанс дать +5 кристаллов (лимит 40/день)
+        const s = Math.round(baseSilver * 1.2);
+        addSilver(s);
+        let extra = "";
+        const daily = game.daily || { key: todayKey(), crystals: 0, gold: 0 };
+        if (win && Math.random() < 0.5 && daily.crystals < 40) {
+          const canGive = Math.min(5, 40 - daily.crystals);
+          addCrystals(canGive);
+          setGame((g)=> ({ ...g, daily: { ...(g.daily||{key:todayKey(), crystals:0, gold:0}), crystals: (g.daily?.crystals||0) + canGive, key: todayKey() } }));
+          extra = `, +${canGive} крист.`;
+        }
+        pushLog(`Весп (кристалл): +${fmt(s)} сера${extra}${win?" (победа)":" (поражение)"}`);
+      }
+      if (preview.kind === "vesp_gold") {
+        // статы сильнее; серебро больше (×1.5), плюс 30% шанс на 2 золота (лимит 15/день)
+        const s = Math.round(baseSilver * 1.5);
+        addSilver(s);
+        let extra = "";
+        const daily = game.daily || { key: todayKey(), crystals: 0, gold: 0 };
+        if (win && Math.random() < 0.30 && daily.gold < 15) {
+          const canGive = Math.min(2, 15 - daily.gold);
+          addGold(canGive);
+          setGame((g)=> ({ ...g, daily: { ...(g.daily||{key:todayKey(), crystals:0, gold:0}), gold: (g.daily?.gold||0) + canGive, key: todayKey() } }));
+          extra = `, +${canGive} зол.`;
+        }
+        pushLog(`Весп (золото): +${fmt(s)} сера${extra}${win?" (победа)":" (поражение)"}`);
+      }
+    }
+
+    // обновим статистику боёв
+    if (win) setGame((g) => ({ ...g, battle: { wins: g.battle.wins + 1, losses: g.battle.losses, streak: g.battle.streak + 1 } }));
+    else setGame((g) => ({ ...g, battle: { wins: g.battle.wins, losses: g.battle.losses + 1, streak: 0 } }));
+  } +${fmt(s)} сера${extra}${win?" (победа)":" (поражение)"}`);
+      }
+    }
+
+    // обновим статистику боёв
+    if (win) setGame((g) => ({ ...g, battle: { wins: g.battle.wins + 1, losses: g.battle.losses, streak: g.battle.streak + 1 } }));
+    else setGame((g) => ({ ...g, battle: { wins: g.battle.wins, losses: g.battle.losses + 1, streak: 0 } }));
+  }
+
+  // Экспедиции
+  function startExpedition(minutes) {
+    if (game.expedition.active) return;
+    const endsAt = Date.now() + minutes * 60 * 1000;
+    setGame((g) => ({ ...g, expedition: { active: true, endsAt, minutes } }));
+    pushLog(`Начат поход на ${minutes} мин.`);
+  }
+  function finishExpedition() {
+    if (!game.expedition.active) return;
+    const minutes = game.expedition.minutes;
+    const ticks = Math.max(1, Math.floor(minutes / 10));
+    let s = 0, c = 0, gld = 0;
+    for (let i = 0; i < ticks; i++) {
+      const roll = Math.random();
+      if (roll < 0.70) s += rnd(500 * level, 1500 * level);
+      else if (roll < 0.95) c += rnd(1, Math.max(1, Math.floor(level / 2)));
+      else gld += 1;
+    }
+    // 7% шанс получить 1 XP за весь поход
+    if (Math.random() < 0.07) addXP(1);
+    if (s) addSilver(s); if (c) addCrystals(c); if (gld) addGold(gld);
+    setGame((g) => ({ ...g, expedition: { active: false, endsAt: 0, minutes: 0 } }));
+    pushLog(`Поход завершён: +${fmt(s)} сера${c ? ", +" + c + " крист." : ""}${gld ? ", +" + gld + " зол." : ""}`);
+  }
+
+  function reset() { if (confirm("Сбросить прогресс?")) { localStorage.removeItem("bjorns-mvp-v01"); window.location.reload(); } }
+
+  // === UI ===
+  const PANEL = "rounded-2xl shadow p-4 bg-white/5 border border-white/10";
+  function StatRow({ k, value, cost }) {
+    return (
+      <div className="grid grid-cols-12 items-center gap-2 py-1 text-sm">
+        <div className="col-span-4 font-semibold">{labelOf(k)}</div>
+        <div className="col-span-4 tabular-nums">{value}</div>
+        <div className="col-span-4 flex justify-end">
+          <button className="px-3 py-1 rounded-xl bg-white/10 hover:bg-white/20 border border-white/10 disabled:opacity-50" onClick={() => upgradeStat(k)} disabled={game.silver < cost || game.expedition.active}>Ап ({fmt(cost)})</button>
+        </div>
+      </div>
+    );
+  }
+  const canFight = game.fight.charges > 0 && !game.expedition.active;
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-slate-900 to-slate-800 text-slate-100 p-6">
+      <div className="max-w-5xl mx-auto grid gap-6">
+        <header className="flex flex-wrap items-center justify-between gap-4">
+          <h1 className="text-2xl font-bold">Bjorns — браузерная RPG (MVP v0.1)</h1>
+          <div className="flex items-center gap-3 text-sm">
+            <button className="px-3 py-1 rounded-xl bg-white/10 border border-white/10" onClick={() => addSilver(5_000)}>+5k сера</button>
+            <button className="px-3 py-1 rounded-xl bg-white/10 border border-white/10" onClick={() => addCrystals(5)}>+5 крист.</button>
+            <button className="px-3 py-1 rounded-xl bg-white/10 border border-white/10" onClick={() => addGold(1)}>+1 зол.</button>
+            <button className="px-3 py-1 rounded-xl bg-white/10 border border-white/10" onClick={reset}>Сброс</button>
+          </div>
+        </header>
+
+        <section className={`${PANEL}`}>
+          <div className="grid md:grid-cols-4 gap-4 text-sm">
+            <div className="md:col-span-2 flex flex-col gap-2">
+              <div>💰 Сера: <span className="font-semibold tabular-nums">{fmt(game.silver)}</span></div>
+              <div>🔷 Кристаллы: <span className="font-semibold tabular-nums">{fmt(game.crystals)}</span></div>
+              <div>🪙 Золото: <span className="font-semibold tabular-nums">{fmt(game.gold)}</span></div>
+            </div>
+            <div className="flex flex-col gap-2">
+              <div>🎚️ Уровень: <span className="font-semibold tabular-nums">{level}</span></div>
+              <div className="flex items-center gap-2">
+                <div className="flex-1 h-2 rounded bg-white/10">
+                  <div className="h-2 rounded bg-white/70" style={{ width: `${clamp((game.progress.xp / game.progress.xpNext) * 100, 0, 100)}%` }} />
+                </div>
+                <span className="text-xs opacity-70 tabular-nums">{game.progress.xp}/{game.progress.xpNext} XP</span>
+              </div>
+              <div>⭐ Мощь: <span className="font-semibold tabular-nums">{fmt(powerScore)}</span></div>
+            </div>
+            <div className="flex flex-col gap-2">
+              <div>⚔️ Бои: <span className="font-semibold tabular-nums">{game.fight.charges}</span>/<span className="tabular-nums">{game.fight.max}</span></div>
+              <div className="opacity-70">+1 бой каждые {game.fight.regenMinutes} мин</div>
+            </div>
+          </div>
+        </section>
+
+        <section className={`${PANEL}`}>
+          <h2 className="font-semibold mb-2">Характеристики</h2>
+          <StatRow k="strength" value={game.stats.strength} cost={costForStat("strength", game.stats.strength)} />
+          <StatRow k="defense" value={game.stats.defense} cost={costForStat("defense", game.stats.defense)} />
+          <StatRow k="mastery" value={game.stats.mastery} cost={costForStat("mastery", game.stats.mastery)} />
+          <StatRow k="agility" value={game.stats.agility} cost={costForStat("agility", game.stats.agility)} />
+          <StatRow k="vitality" value={game.stats.vitality} cost={costForStat("vitality", game.stats.vitality)} />
+          <div className="text-xs opacity-70 mt-2">Стоимость апа растёт: Сила дороже всего → Живучесть дешевле всего.</div>
+        </section>
+
+        <section className={`${PANEL} grid md:grid-cols-3 gap-4`}>
+          <div>
+            <h3 className="font-semibold mb-2">Бои</h3>
+            {!preview && (
+              <div className="grid gap-2">
+                <button className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/10 disabled:opacity-50" disabled={!canFight || game.expedition.active} onClick={() => openPreview("player")}>Поиск игрока</button>
+                <div className="grid grid-cols-1 gap-2">
+                  <button className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/10 disabled:opacity-50" disabled={!canFight || game.expedition.active} onClick={() => openPreview("vesp_silver")}>Серебряный весп</button>
+                  <button className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/10 disabled:opacity-50" disabled={!canFight || game.expedition.active} onClick={() => openPreview("vesp_crystal")}>Кристальный весп</button>
+                  <button className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/10 disabled:opacity-50" disabled={!canFight || game.expedition.active} onClick={() => openPreview("vesp_gold")}>Золотой весп</button>
+                </div>
+              </div>
+            )}
+            {preview && (
+              <div className="space-y-2">
+                <div className="text-sm opacity-80">Цель: {preview.kind === 'player' ? 'Игрок' : preview.kind === 'vesp_silver' ? 'Весп (серебро)' : preview.kind === 'vesp_crystal' ? 'Весп (кристалл)' : 'Весп (золото)'} {preview.level ? `(лвл ${preview.level})` : ''}</div>
+                <div className="grid grid-cols-5 gap-2 text-sm">
+                  <div>Сила: <span className="tabular-nums">{preview.stats.strength}</span></div>
+                  <div>Защита: <span className="tabular-nums">{preview.stats.defense}</span></div>
+                  <div>Мастерство: <span className="tabular-nums">{preview.stats.mastery}</span></div>
+                  <div>Ловкость: <span className="tabular-nums">{preview.stats.agility}</span></div>
+                  <div>Живучесть: <span className="tabular-nums">{preview.stats.vitality}</span></div>
+                </div>
+                <div className="flex gap-2">
+                  <button className="px-4 py-2 rounded-xl bg-emerald-500/80 hover:bg-emerald-500 text-white disabled:opacity-50" disabled={!canFight || game.expedition.active} onClick={resolvePreviewFight}>Сражаться</button>
+                  <button className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/10" onClick={nextPreview}>Следующий</button>
+                  <button className="ml-auto px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/10" onClick={() => setPreview(null)}>Назад</button>
+                </div>
+                {preview.kind!== 'player' && (
+                  <div className="text-xs opacity-70">
+                    {preview.kind==='vesp_silver' && `Награда: серебро (≈${fmt(rnd(800*level,1600*level))}).`}
+                    {preview.kind==='vesp_crystal' && 'Награда: серебро (чуть больше) и 50% шанс +5 кристаллов. Лимит: 40 кристаллов/день.'}
+                    {preview.kind==='vesp_gold' && 'Награда: серебро и 30% шанс +2 золота. Лимит: 15 золота/день.'}
+                  </div>
+                )}
+              </div>
+            )}
+            {game.expedition.active && <div className="mt-3 text-sm text-amber-300">В походе — предпросмотр и сражения недоступны</div>}
+          </div>
+            {game.expedition.active && <div className="mt-3 text-sm text-amber-300">В походе — сражения недоступны</div>}
+          </div>
+          <div>
+            <h3 className="font-semibold mb-2">Походы</h3>
+            <div className="grid grid-cols-2 gap-2">
+              {[10,20,60,240,360].map((m)=> (
+                <button key={m} className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/10 disabled:opacity-50" disabled={game.expedition.active} onClick={() => startExpedition(m)}>{m} мин</button>
+              ))}
+            </div>
+            {game.expedition.active ? (
+              <div className="mt-3 text-sm">
+                Идёт поход на {game.expedition.minutes} мин. Завершение: {new Date(game.expedition.endsAt).toLocaleTimeString()}
+                <div className="mt-2"><button className="px-3 py-1 rounded-xl bg-white/10 border border-white/10" onClick={finishExpedition}>Завершить (если время вышло)</button></div>
+              </div>
+            ) : (
+              <div className="mt-3 text-sm opacity-70">Во время похода сражаться нельзя. Дроп: часто сера, реже кристаллы, очень редко золото. 7% шанс получить 1 XP.</div>
+            )}
+          </div>
+          <div>
+            <h3 className="font-semibold mb-2">Журнал</h3>
+            <div className="h-40 overflow-auto text-sm space-y-1 pr-1">
+              {game.log.length === 0 && <div className="opacity-60">Пусто…</div>}
+              {game.log.map((line, i) => (<div key={i} className="opacity-90">• {line}</div>))}
+            </div>
+            <div className="text-xs opacity-60 mt-2">Победы: {game.battle.wins} / Поражения: {game.battle.losses} / Стрик: {game.battle.streak}</div>
+          </div>
+        </section>
+
+        <footer className="text-xs opacity-60 text-center">MVP v0.1 — XP-система включена. Дальше: выбор целей, экспорт сейва, конфиг экономики, питомец, бусты.</footer>
+      </div>
+    </div>
+  );
+}
