@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import CFG from "./config";
 
 /** ==== helpers ==== */
 const clamp = (v, min, max) => Math.min(Math.max(v, min), max);
